@@ -6,10 +6,9 @@ query points.  Edges connect mutually visible pairs.  A* is used for the
 graph search.
 
 This differs from the Dijkstra / A* strategies which use barycentric
-face-interior sampling.  The visibility graph approach relies on the
-observation that the shortest path around a convex polyhedral obstacle
-must pass through its vertices or edge points (Alexandrov / shortest
-path on polyhedra theory).
+face-interior sampling.  It is kept as a compact demonstrational graph
+method; unlike Chen-Han Exact, it does not solve the continuous surface
+shortest-path problem exactly.
 """
 
 from __future__ import annotations
@@ -37,8 +36,7 @@ class VisibilityGraphStrategy(PathfindingStrategy):
         5. Optionally smooth the result.
 
     This strategy produces fewer nodes than face sampling, making it
-    faster on dense meshes, while still capturing the key boundary
-    features that shortest paths travel through.
+    faster on dense meshes, but it remains a discrete approximation.
     """
 
     @property

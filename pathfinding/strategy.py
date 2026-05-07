@@ -1,8 +1,8 @@
 """Abstract base class for pathfinding strategies (Strategy Pattern).
 
-Every concrete algorithm (Dijkstra, A*, visibility graph, geodesic
-approximation, …) implements :class:`PathfindingStrategy` so that the
-application can swap algorithms at runtime without changing calling code.
+Every concrete algorithm (Chen-Han Exact, Dijkstra, A*, visibility graph,
+geodesic approximation, ...) implements :class:`PathfindingStrategy` so that
+the application can swap algorithms at runtime without changing calling code.
 """
 
 from __future__ import annotations
@@ -26,7 +26,8 @@ class PathResult:
         points:         Ordered 3-D waypoints from start to end.
         raw_points:     Waypoints before smoothing (empty when smoothing is off).
         smoothed:       Whether the result has been smoothed.
-        graph:          The graph that was constructed (if applicable).
+        graph:          The graph that was constructed (if applicable). Exact
+                        continuous strategies may leave this as ``None``.
         num_samples:    Number of face-sample points used.
         algorithm_name: Human-readable name of the algorithm that produced
                         this result.

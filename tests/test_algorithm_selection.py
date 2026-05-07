@@ -18,6 +18,7 @@ import pytest
 
 from core.vector3 import Vector3
 from main import Application, AVAILABLE_STRATEGIES
+from pathfinding.chen_han_exact_strategy import ChenHanExactStrategy
 from pathfinding.dijkstra_strategy import DijkstraStrategy
 from pathfinding.astar_strategy import AStarStrategy
 from pathfinding.visibility_graph_strategy import VisibilityGraphStrategy
@@ -40,14 +41,15 @@ def app(tmp_path):
 # ═══════════════════════════════════════════════════════════
 
 class TestAvailableStrategies:
-    def test_contains_all_four(self):
-        assert len(AVAILABLE_STRATEGIES) == 4
+    def test_contains_all_strategies(self):
+        assert len(AVAILABLE_STRATEGIES) == 5
 
     def test_order(self):
-        assert AVAILABLE_STRATEGIES[0] is DijkstraStrategy
-        assert AVAILABLE_STRATEGIES[1] is AStarStrategy
-        assert AVAILABLE_STRATEGIES[2] is VisibilityGraphStrategy
-        assert AVAILABLE_STRATEGIES[3] is GeodesicApproxStrategy
+        assert AVAILABLE_STRATEGIES[0] is ChenHanExactStrategy
+        assert AVAILABLE_STRATEGIES[1] is DijkstraStrategy
+        assert AVAILABLE_STRATEGIES[2] is AStarStrategy
+        assert AVAILABLE_STRATEGIES[3] is VisibilityGraphStrategy
+        assert AVAILABLE_STRATEGIES[4] is GeodesicApproxStrategy
 
     def test_all_are_strategy_subclasses(self):
         from pathfinding.strategy import PathfindingStrategy
@@ -60,37 +62,43 @@ class TestAvailableStrategies:
 # ═══════════════════════════════════════════════════════════
 
 class TestCycleAlgorithm:
-    def test_initial_strategy_is_dijkstra(self, app):
-        assert app.path_finder.algorithm_name == "Dijkstra"
+    def test_initial_strategy_is_chen_han_exact(self, app):
+        assert app.path_finder.algorithm_name == "Chen-Han Exact"
         assert app._strategy_index == 0
+
+    def test_cycle_to_dijkstra(self, app):
+        app._cycle_algorithm()
+        assert app.path_finder.algorithm_name == "Dijkstra"
+        assert app._strategy_index == 1
 
     def test_cycle_to_astar(self, app):
         app._cycle_algorithm()
+        app._cycle_algorithm()
         assert app.path_finder.algorithm_name == "A*"
-        assert app._strategy_index == 1
-
-    def test_cycle_to_visibility_graph(self, app):
-        app._cycle_algorithm()
-        app._cycle_algorithm()
-        assert app.path_finder.algorithm_name == "Visibility Graph"
         assert app._strategy_index == 2
 
-    def test_cycle_to_geodesic(self, app):
+    def test_cycle_to_visibility_graph(self, app):
         for _ in range(3):
             app._cycle_algorithm()
-        assert app.path_finder.algorithm_name == "Geodesic Approx"
+        assert app.path_finder.algorithm_name == "Visibility Graph"
         assert app._strategy_index == 3
 
-    def test_cycle_wraps_to_dijkstra(self, app):
+    def test_cycle_to_geodesic(self, app):
         for _ in range(4):
             app._cycle_algorithm()
-        assert app.path_finder.algorithm_name == "Dijkstra"
+        assert app.path_finder.algorithm_name == "Geodesic Approx"
+        assert app._strategy_index == 4
+
+    def test_cycle_wraps_to_chen_han_exact(self, app):
+        for _ in range(5):
+            app._cycle_algorithm()
+        assert app.path_finder.algorithm_name == "Chen-Han Exact"
         assert app._strategy_index == 0
 
     def test_full_cycle_names(self, app):
-        expected = ["A*", "Visibility Graph", "Geodesic Approx", "Dijkstra"]
+        expected = ["Dijkstra", "A*", "Visibility Graph", "Geodesic Approx", "Chen-Han Exact"]
         actual = []
-        for _ in range(4):
+        for _ in range(5):
             app._cycle_algorithm()
             actual.append(app.path_finder.algorithm_name)
         assert actual == expected
@@ -139,16 +147,16 @@ class TestHudAlgorithmName:
     def test_title_shows_algorithm(self, app):
         app._update_hud()
         texts = [line[0] for line in app.hud_renderer.lines]
-        assert any("Dijkstra" in t for t in texts)
+        assert any("Chen-Han Exact" in t for t in texts)
 
     def test_title_updates_after_cycle(self, app):
         app._cycle_algorithm()
         app._update_hud()
         texts = [line[0] for line in app.hud_renderer.lines]
-        assert any("A*" in t for t in texts)
+        assert any("Dijkstra" in t for t in texts)
 
     def test_title_shows_all_algorithms_on_cycle(self, app):
-        expected_names = ["A*", "Visibility Graph", "Geodesic Approx", "Dijkstra"]
+        expected_names = ["Dijkstra", "A*", "Visibility Graph", "Geodesic Approx", "Chen-Han Exact"]
         for name in expected_names:
             app._cycle_algorithm()
             app._update_hud()

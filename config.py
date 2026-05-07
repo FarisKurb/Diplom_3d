@@ -29,6 +29,7 @@ POINT_RADIUS: float = 0.05
 
 # Per-algorithm path colours (keyed by strategy.name)
 ALGORITHM_COLORS: dict[str, tuple] = {
+    "Chen-Han Exact": (0.9, 0.2, 0.9),  # magenta
     "Dijkstra": (1.0, 0.3, 0.1),        # red-orange
     "A*": (0.2, 0.9, 0.3),              # green
     "Visibility Graph": (0.3, 0.5, 1.0), # blue

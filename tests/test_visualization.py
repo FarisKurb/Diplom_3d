@@ -59,6 +59,9 @@ class TestAlgorithmColors:
     def test_dijkstra_colour(self):
         assert ALGORITHM_COLORS["Dijkstra"] == (1.0, 0.3, 0.1)
 
+    def test_chen_han_colour(self):
+        assert ALGORITHM_COLORS["Chen-Han Exact"] == (0.9, 0.2, 0.9)
+
     def test_astar_colour(self):
         assert ALGORITHM_COLORS["A*"] == (0.2, 0.9, 0.3)
 
@@ -146,23 +149,23 @@ class TestDebugConfigConstants:
 # ═══════════════════════════════════════════════════════════
 
 class TestPerAlgorithmColorOnCompute:
-    def test_default_dijkstra_color(self, app):
+    def test_default_chen_han_color(self, app):
+        start, end = Vector3(0, 0, 0), Vector3(1, 1, 1)
+        app._compute_and_display(start, end)
+        assert app.path_renderer.path_color == ALGORITHM_COLORS["Chen-Han Exact"]
+
+    def test_dijkstra_color_after_cycle(self, app):
+        app._cycle_algorithm()  # Chen-Han Exact -> Dijkstra
         start, end = Vector3(0, 0, 0), Vector3(1, 1, 1)
         app._compute_and_display(start, end)
         assert app.path_renderer.path_color == ALGORITHM_COLORS["Dijkstra"]
-
-    def test_astar_color_after_cycle(self, app):
-        app._cycle_algorithm()  # → A*
-        start, end = Vector3(0, 0, 0), Vector3(1, 1, 1)
-        app._compute_and_display(start, end)
-        assert app.path_renderer.path_color == ALGORITHM_COLORS["A*"]
 
     def test_color_changes_when_algorithm_changes(self, app):
         start, end = Vector3(0, 0, 0), Vector3(1, 1, 1)
         app._compute_and_display(start, end)
         c1 = app.path_renderer.path_color
 
-        app._cycle_algorithm()  # → A*
+        app._cycle_algorithm()  # Chen-Han Exact -> Dijkstra
         app._compute_and_display(start, end)
         c2 = app.path_renderer.path_color
 

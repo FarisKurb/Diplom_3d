@@ -17,7 +17,7 @@ class PathFinder:
 
     Usage::
 
-        finder = PathFinder(DijkstraStrategy())
+        finder = PathFinder(ChenHanExactStrategy())
         result = finder.compute_path(start, end, mesh)
 
         # swap algorithm at runtime

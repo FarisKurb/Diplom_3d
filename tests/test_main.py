@@ -81,7 +81,7 @@ class TestApplicationConstruction:
 
     def test_path_finder_created(self, app: Application):
         assert app.path_finder is not None
-        assert app.path_finder.algorithm_name == "Dijkstra"
+        assert app.path_finder.algorithm_name == "Chen-Han Exact"
 
     def test_point_placer_not_created_before_run(self, app: Application):
         # PointPlacer requires a GLFW window, so it's None before run().

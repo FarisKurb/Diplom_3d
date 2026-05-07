@@ -22,6 +22,7 @@ import pytest
 from core.vector3 import Vector3
 from interaction.point_placer import PlacementState
 from main import Application, AVAILABLE_STRATEGIES, STRATEGY_ALIASES
+from pathfinding.chen_han_exact_strategy import ChenHanExactStrategy
 from pathfinding.dijkstra_strategy import DijkstraStrategy
 from pathfinding.astar_strategy import AStarStrategy
 from pathfinding.visibility_graph_strategy import VisibilityGraphStrategy
@@ -62,6 +63,12 @@ class TestStrategyAliases:
     def test_dijkstra_alias(self):
         assert STRATEGY_ALIASES["dijkstra"] is DijkstraStrategy
 
+    def test_chen_han_aliases(self):
+        assert STRATEGY_ALIASES["chenhan"] is ChenHanExactStrategy
+        assert STRATEGY_ALIASES["chen-han"] is ChenHanExactStrategy
+        assert STRATEGY_ALIASES["chen_han"] is ChenHanExactStrategy
+        assert STRATEGY_ALIASES["exact"] is ChenHanExactStrategy
+
     def test_astar_aliases(self):
         assert STRATEGY_ALIASES["astar"] is AStarStrategy
         assert STRATEGY_ALIASES["a*"] is AStarStrategy
@@ -85,9 +92,13 @@ class TestStrategyAliases:
 # ═══════════════════════════════════════════════════════════
 
 class TestResolveInitialStrategy:
-    def test_none_returns_dijkstra(self, app):
+    def test_none_returns_chen_han_exact(self, app):
         strategy = app._resolve_initial_strategy(None)
-        assert isinstance(strategy, DijkstraStrategy)
+        assert isinstance(strategy, ChenHanExactStrategy)
+
+    def test_chen_han_alias(self, app):
+        strategy = app._resolve_initial_strategy("chenhan")
+        assert isinstance(strategy, ChenHanExactStrategy)
 
     def test_dijkstra_alias(self, app):
         strategy = app._resolve_initial_strategy("dijkstra")
@@ -109,9 +120,9 @@ class TestResolveInitialStrategy:
         strategy = app._resolve_initial_strategy("geodesic")
         assert isinstance(strategy, GeodesicApproxStrategy)
 
-    def test_unknown_falls_back_to_dijkstra(self, app):
+    def test_unknown_falls_back_to_chen_han_exact(self, app):
         strategy = app._resolve_initial_strategy("bogus")
-        assert isinstance(strategy, DijkstraStrategy)
+        assert isinstance(strategy, ChenHanExactStrategy)
 
     def test_case_insensitive(self, app):
         strategy = app._resolve_initial_strategy("ASTAR")
@@ -131,12 +142,12 @@ class TestResolveInitialStrategy:
 # ═══════════════════════════════════════════════════════════
 
 class TestConstructorAlgorithm:
-    def test_default_is_dijkstra(self, tmp_path):
+    def test_default_is_chen_han_exact(self, tmp_path):
         from mesh.obj_loader import ensure_default_cube
         obj = str(tmp_path / "c.obj")
         ensure_default_cube(obj)
         app = Application(mesh_path=obj)
-        assert app.path_finder.algorithm_name == "Dijkstra"
+        assert app.path_finder.algorithm_name == "Chen-Han Exact"
 
     def test_algorithm_astar(self, tmp_path):
         from mesh.obj_loader import ensure_default_cube
@@ -144,7 +155,7 @@ class TestConstructorAlgorithm:
         ensure_default_cube(obj)
         app = Application(mesh_path=obj, algorithm="astar")
         assert app.path_finder.algorithm_name == "A*"
-        assert app._strategy_index == 1
+        assert app._strategy_index == 2
 
     def test_algorithm_geodesic(self, tmp_path):
         from mesh.obj_loader import ensure_default_cube
@@ -152,14 +163,14 @@ class TestConstructorAlgorithm:
         ensure_default_cube(obj)
         app = Application(mesh_path=obj, algorithm="geodesic")
         assert app.path_finder.algorithm_name == "Geodesic Approx"
-        assert app._strategy_index == 3
+        assert app._strategy_index == 4
 
     def test_algorithm_unknown_falls_back(self, tmp_path):
         from mesh.obj_loader import ensure_default_cube
         obj = str(tmp_path / "c.obj")
         ensure_default_cube(obj)
         app = Application(mesh_path=obj, algorithm="nonexistent")
-        assert app.path_finder.algorithm_name == "Dijkstra"
+        assert app.path_finder.algorithm_name == "Chen-Han Exact"
 
 
 # ═══════════════════════════════════════════════════════════

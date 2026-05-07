@@ -4,6 +4,7 @@ Usage::
 
     python main.py                              # loads default cube
     python main.py path/to/model.obj            # loads custom mesh
+    python main.py --algorithm chenhan          # start with Chen-Han Exact
     python main.py --algorithm astar            # start with A*
     python main.py model.obj --algorithm geodesic
 
@@ -40,6 +41,7 @@ from render.hud_renderer import HudRenderer
 from interaction.point_placer import PointPlacer, PlacementState
 from pathfinding.strategy import PathfindingStrategy, PathResult
 from pathfinding.path_finder import PathFinder
+from pathfinding.chen_han_exact_strategy import ChenHanExactStrategy
 from pathfinding.dijkstra_strategy import DijkstraStrategy
 from pathfinding.astar_strategy import AStarStrategy
 from pathfinding.visibility_graph_strategy import VisibilityGraphStrategy
@@ -50,6 +52,7 @@ from config import HUD_COLOR, HUD_TITLE_COLOR, ALGORITHM_COLORS
 
 # Ordered list of available strategies (cycled with the A key).
 AVAILABLE_STRATEGIES: list[type[PathfindingStrategy]] = [
+    ChenHanExactStrategy,
     DijkstraStrategy,
     AStarStrategy,
     VisibilityGraphStrategy,
@@ -58,6 +61,10 @@ AVAILABLE_STRATEGIES: list[type[PathfindingStrategy]] = [
 
 # Map of CLI-friendly names to strategy classes.
 STRATEGY_ALIASES: dict[str, type[PathfindingStrategy]] = {
+    "chenhan": ChenHanExactStrategy,
+    "chen-han": ChenHanExactStrategy,
+    "chen_han": ChenHanExactStrategy,
+    "exact": ChenHanExactStrategy,
     "dijkstra": DijkstraStrategy,
     "astar": AStarStrategy,
     "a*": AStarStrategy,
@@ -276,7 +283,7 @@ class Application:
                 if cls in AVAILABLE_STRATEGIES:
                     self._strategy_index = AVAILABLE_STRATEGIES.index(cls)
                 return cls()
-            print(f"Unknown algorithm '{algorithm}', falling back to Dijkstra.")
+            print(f"Unknown algorithm '{algorithm}', falling back to Chen-Han Exact.")
         return AVAILABLE_STRATEGIES[0]()
 
     @staticmethod
