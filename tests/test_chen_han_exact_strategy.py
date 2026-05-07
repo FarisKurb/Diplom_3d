@@ -51,6 +51,25 @@ def test_cube_between_points_path_does_not_enter_cube(tmp_path):
         assert not segment_intersects_mesh(a, b, mesh.triangles)
 
 
+def test_blocked_case_uses_window_predecessor_chain(tmp_path):
+    mesh = _cube_mesh(tmp_path)
+    strategy = ChenHanExactStrategy()
+    start = Vector3(-2.0, 0.0, 0.0)
+    end = Vector3(2.0, 0.0, 0.0)
+    vertices, faces = strategy._build_convex_hull([*mesh.vertices, start, end])
+    start_id = strategy._find_vertex(vertices, start)
+    end_id = strategy._find_vertex(vertices, end)
+
+    assert start_id is not None
+    assert end_id is not None
+    candidate = strategy._chen_han_shortest_path(vertices, faces, start_id, end_id)
+
+    assert candidate is not None
+    assert candidate.window.edge is not None
+    assert candidate.window.predecessor is not None
+    assert len(candidate.window.sequence) >= 2
+
+
 def test_chen_han_exact_is_default_strategy(tmp_path):
     obj_path = str(tmp_path / "cube.obj")
     ensure_default_cube(obj_path)

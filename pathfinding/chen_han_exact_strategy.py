@@ -1,26 +1,28 @@
-"""Exact Chen-Han style shortest path on one convex polyhedral obstacle.
+"""Exact Chen-Han window propagation for one convex polyhedral obstacle.
 
 For one convex obstacle the free-space shortest path is either the direct
-segment, or a geodesic on the convex hull of ``obstacle vertices + start +
-end``.  This strategy builds that hull and searches unfolded face strips:
-each candidate strip is flattened across its shared edges, the straight line
-in the unfolding is tested against the propagated edge intervals, and the
-shortest valid unfolding is returned.
+segment or a geodesic on the convex hull of ``vertices(P) + start + end``.
+This module implements the second case with Chen-Han style windows:
 
-The implementation deliberately does not build a visibility graph and does
-not restrict the path to mesh vertices or edges; waypoints are crossing points
-on hull edges between unfolded faces, while the path pieces inside faces are
-straight geodesic segments.
+* a window is an interval on an edge of an unfolded triangle;
+* it stores the pseudo-source image, distance to that pseudo-source, unfolded
+  face sequence, and a predecessor window;
+* windows are propagated through adjacent triangles by unfolding the next face;
+* dominated windows on the same directed edge are removed;
+* the final path is recovered by following predecessor windows backward.
+
+No visibility graph, Dijkstra/A*, vertex/edge search, or sampling is used.
 """
 
 from __future__ import annotations
 
+from collections import deque
 import itertools
 import math
-from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from dataclasses import dataclass, field
+from typing import Deque, Dict, List, Optional, Sequence, Tuple
 
-from core.math_utils import EPSILON
+from core.math_utils import EPSILON, barycentric_coordinates
 from core.vector3 import Vector3
 from geometry.intersection import segment_intersects_mesh
 from mesh.mesh import Mesh
@@ -32,20 +34,34 @@ Face = Tuple[int, int, int]
 Edge = Tuple[int, int]
 
 
+@dataclass
+class _Window:
+    """Chen-Han propagation window on one edge of one unfolded face."""
+
+    face_id: int
+    edge: Optional[Edge]
+    left: float
+    right: float
+    pseudo_source: Point2
+    source_distance: float
+    face_coords: Dict[int, Point2]
+    sequence: List[int]
+    predecessor: Optional["_Window"] = None
+    id: int = field(default=0)
+
+
 @dataclass(frozen=True)
-class _UnfoldedStrip:
-    points: List[Vector3]
+class _TargetCandidate:
+    window: _Window
     distance: float
 
 
 class ChenHanExactStrategy(PathfindingStrategy):
-    """Exact surface shortest path strategy for one convex obstacle.
+    """Exact surface shortest path strategy for one convex obstacle."""
 
-    The direct segment is returned immediately when it does not enter the
-    obstacle interior.  Otherwise the algorithm builds the convex hull of the
-    obstacle vertices plus the query points and propagates Chen-Han style
-    windows by unfolding adjacent triangle strips on the hull surface.
-    """
+    def __init__(self, *, max_windows: int = 10000) -> None:
+        self.max_windows = max_windows
+        self._next_window_id = 1
 
     @property
     def name(self) -> str:
@@ -81,15 +97,22 @@ class ChenHanExactStrategy(PathfindingStrategy):
         if start_id is None or end_id is None:
             return PathResult(found=False, algorithm_name=self.name)
 
-        best = self._shortest_unfolded_path(hull_vertices, hull_faces, start_id, end_id)
-        if best is None:
+        candidate = self._chen_han_shortest_path(
+            hull_vertices,
+            hull_faces,
+            start_id,
+            end_id,
+        )
+        if candidate is None:
             return PathResult(found=False, algorithm_name=self.name)
 
+        points = self._recover_path(candidate.window, end_id, hull_vertices, hull_faces)
+        distance = self._path_length(points)
         return PathResult(
             found=True,
-            distance=best.distance,
-            points=best.points,
-            raw_points=list(best.points),
+            distance=distance,
+            points=points,
+            raw_points=list(points),
             smoothed=False,
             graph=None,
             num_samples=0,
@@ -230,137 +253,353 @@ class ChenHanExactStrategy(PathfindingStrategy):
             return (a, c, b)
         return face
 
-    def _shortest_unfolded_path(
+    def _chen_han_shortest_path(
         self,
         vertices: Sequence[Vector3],
         faces: Sequence[Face],
         start_id: int,
         end_id: int,
-    ) -> Optional[_UnfoldedStrip]:
-        adjacency = self._face_adjacency(faces)
+    ) -> Optional[_TargetCandidate]:
+        edge_to_faces = self._edge_to_faces(faces)
         start_faces = [i for i, face in enumerate(faces) if start_id in face]
         end_faces = {i for i, face in enumerate(faces) if end_id in face}
         if not start_faces or not end_faces:
             return None
 
-        best: Optional[_UnfoldedStrip] = None
-        for start_face in start_faces:
-            stack: list[tuple[int, list[int], set[int]]] = [(start_face, [start_face], {start_face})]
-            while stack:
-                current, sequence, visited = stack.pop()
-                if current in end_faces:
-                    candidate = self._unfold_sequence(vertices, faces, sequence, start_id, end_id)
-                    if candidate is not None and (
-                        best is None or candidate.distance < best.distance - 1e-8
-                    ):
-                        best = candidate
+        self._next_window_id = 1
+        queue: Deque[_Window] = deque()
+        active: Dict[Tuple[int, Edge], List[_Window]] = {}
+        best: Optional[_TargetCandidate] = None
 
-                if len(sequence) >= len(faces):
+        for face_id in start_faces:
+            face_coords = self._initial_face_coords(vertices, faces[face_id])
+            source = face_coords[start_id]
+            seed = self._new_window(
+                face_id=face_id,
+                edge=None,
+                left=0.0,
+                right=1.0,
+                pseudo_source=source,
+                source_distance=0.0,
+                face_coords=face_coords,
+                sequence=[face_id],
+                predecessor=None,
+            )
+            queue.append(seed)
+
+        processed = 0
+        while queue and processed < self.max_windows:
+            window = queue.popleft()
+            processed += 1
+
+            if window.face_id in end_faces:
+                reached = self._try_reach_target(window, vertices, faces, end_id)
+                if reached is not None and (
+                    best is None or reached.distance < best.distance - 1e-8
+                ):
+                    best = reached
+
+            for child in self._propagate_window(window, vertices, faces, edge_to_faces):
+                if best is not None:
+                    optimistic = self._lower_bound_to_target(child, vertices, faces, end_id)
+                    if optimistic >= best.distance - 1e-8:
+                        continue
+                key = (child.face_id, child.edge)
+                if child.edge is None:
                     continue
-                for nxt in adjacency[current]:
-                    if nxt not in visited:
-                        stack.append((nxt, [*sequence, nxt], visited | {nxt}))
+                kept = active.setdefault(key, [])
+                if self._is_dominated(child, kept):
+                    continue
+                kept[:] = [old for old in kept if not self._dominates(child, old)]
+                kept.append(child)
+                queue.append(child)
+
         return best
 
+    def _new_window(
+        self,
+        *,
+        face_id: int,
+        edge: Optional[Edge],
+        left: float,
+        right: float,
+        pseudo_source: Point2,
+        source_distance: float,
+        face_coords: Dict[int, Point2],
+        sequence: List[int],
+        predecessor: Optional[_Window],
+    ) -> _Window:
+        window = _Window(
+            face_id=face_id,
+            edge=edge,
+            left=max(0.0, min(left, right)),
+            right=min(1.0, max(left, right)),
+            pseudo_source=pseudo_source,
+            source_distance=source_distance,
+            face_coords=face_coords,
+            sequence=sequence,
+            predecessor=predecessor,
+            id=self._next_window_id,
+        )
+        self._next_window_id += 1
+        return window
+
     @staticmethod
-    def _face_adjacency(faces: Sequence[Face]) -> Dict[int, List[int]]:
+    def _edge_to_faces(faces: Sequence[Face]) -> Dict[Edge, List[int]]:
         edge_to_faces: Dict[Edge, List[int]] = {}
         for face_id, face in enumerate(faces):
             for edge in ((face[0], face[1]), (face[1], face[2]), (face[2], face[0])):
                 edge_to_faces.setdefault(tuple(sorted(edge)), []).append(face_id)
+        return edge_to_faces
 
-        adjacency = {i: [] for i in range(len(faces))}
-        for incident in edge_to_faces.values():
-            if len(incident) == 2:
-                a, b = incident
-                adjacency[a].append(b)
-                adjacency[b].append(a)
-        return adjacency
+    def _propagate_window(
+        self,
+        window: _Window,
+        vertices: Sequence[Vector3],
+        faces: Sequence[Face],
+        edge_to_faces: Dict[Edge, List[int]],
+    ) -> List[_Window]:
+        face = faces[window.face_id]
+        outgoing_edges = [tuple(sorted(edge)) for edge in self._face_edges(face)]
+        if window.edge is not None:
+            outgoing_edges = [edge for edge in outgoing_edges if edge != window.edge]
 
-    def _unfold_sequence(
+        children: list[_Window] = []
+        for out_edge in outgoing_edges:
+            out_interval = self._project_window_to_edge(window, out_edge)
+            if out_interval is None:
+                continue
+
+            neighbor = self._neighbor_across_edge(edge_to_faces, window.face_id, out_edge)
+            if neighbor is None or neighbor in window.sequence:
+                continue
+
+            neighbor_coords = self._unfold_neighbor_face(
+                vertices,
+                faces,
+                window.face_id,
+                neighbor,
+                out_edge,
+                window.face_coords,
+            )
+            if neighbor_coords is None:
+                continue
+
+            child = self._new_window(
+                face_id=neighbor,
+                edge=out_edge,
+                left=out_interval[0],
+                right=out_interval[1],
+                pseudo_source=window.pseudo_source,
+                source_distance=window.source_distance,
+                face_coords=neighbor_coords,
+                sequence=[*window.sequence, neighbor],
+                predecessor=window,
+            )
+            children.append(child)
+        return children
+
+    @staticmethod
+    def _face_edges(face: Face) -> Tuple[Edge, Edge, Edge]:
+        return ((face[0], face[1]), (face[1], face[2]), (face[2], face[0]))
+
+    @staticmethod
+    def _neighbor_across_edge(
+        edge_to_faces: Dict[Edge, List[int]],
+        face_id: int,
+        edge: Edge,
+    ) -> Optional[int]:
+        incident = edge_to_faces.get(edge, [])
+        if len(incident) != 2:
+            return None
+        return incident[1] if incident[0] == face_id else incident[0]
+
+    def _project_window_to_edge(self, window: _Window, out_edge: Edge) -> Optional[Tuple[float, float]]:
+        if window.edge is None:
+            return (0.0, 1.0)
+
+        a = window.face_coords[out_edge[0]]
+        b = window.face_coords[out_edge[1]]
+        samples = [0.0, 1.0]
+        entry_a = self._edge_point_2d(window, window.left)
+        entry_b = self._edge_point_2d(window, window.right)
+
+        for boundary in (entry_a, entry_b):
+            hit = self._line_line_intersection(window.pseudo_source, boundary, a, b)
+            if hit is not None:
+                _ray_t, edge_t = hit
+                if -1e-8 <= edge_t <= 1.0 + 1e-8:
+                    samples.append(max(0.0, min(1.0, edge_t)))
+
+        samples = sorted(set(round(t, 12) for t in samples if -1e-8 <= t <= 1.0 + 1e-8))
+        intervals: list[tuple[float, float]] = []
+        for lo, hi in zip(samples, samples[1:]):
+            mid = (lo + hi) * 0.5
+            if self._edge_point_sees_window(window, out_edge, mid):
+                intervals.append((lo, hi))
+
+        for t in samples:
+            if self._edge_point_sees_window(window, out_edge, t):
+                intervals.append((t, t))
+
+        if not intervals:
+            return None
+
+        left = min(lo for lo, _hi in intervals)
+        right = max(hi for _lo, hi in intervals)
+        if right - left < 1e-10:
+            return None
+        return (left, right)
+
+    def _edge_point_sees_window(self, window: _Window, edge: Edge, edge_t: float) -> bool:
+        point = self._point_on_edge_2d(window.face_coords, edge, edge_t)
+        hit = self._segment_intersection_2d(
+            window.pseudo_source,
+            point,
+            window.face_coords[window.edge[0]],
+            window.face_coords[window.edge[1]],
+        )
+        if hit is None:
+            return False
+        line_t, entry_t = hit
+        return (
+            -1e-8 <= line_t <= 1.0 + 1e-8
+            and window.left - 1e-8 <= entry_t <= window.right + 1e-8
+        )
+
+    def _try_reach_target(
+        self,
+        window: _Window,
+        vertices: Sequence[Vector3],
+        faces: Sequence[Face],
+        end_id: int,
+    ) -> Optional[_TargetCandidate]:
+        end_2d = window.face_coords.get(end_id)
+        if end_2d is None:
+            return None
+        if window.edge is not None:
+            hit = self._segment_intersection_2d(
+                window.pseudo_source,
+                end_2d,
+                window.face_coords[window.edge[0]],
+                window.face_coords[window.edge[1]],
+            )
+            if hit is None:
+                return None
+            line_t, entry_t = hit
+            if not (
+                -1e-8 <= line_t <= 1.0 + 1e-8
+                and window.left - 1e-8 <= entry_t <= window.right + 1e-8
+            ):
+                return None
+
+        distance = window.source_distance + self._distance_2d(window.pseudo_source, end_2d)
+        return _TargetCandidate(window=window, distance=distance)
+
+    def _lower_bound_to_target(
+        self,
+        window: _Window,
+        vertices: Sequence[Vector3],
+        faces: Sequence[Face],
+        end_id: int,
+    ) -> float:
+        if end_id in window.face_coords:
+            return window.source_distance + self._distance_2d(
+                window.pseudo_source,
+                window.face_coords[end_id],
+            )
+        return window.source_distance
+
+    def _is_dominated(self, candidate: _Window, existing: Sequence[_Window]) -> bool:
+        return any(self._dominates(old, candidate) for old in existing)
+
+    def _dominates(self, a: _Window, b: _Window) -> bool:
+        if a.edge != b.edge or a.face_id != b.face_id:
+            return False
+        if a.left > b.left + 1e-8 or a.right < b.right - 1e-8:
+            return False
+        checks = (b.left, (b.left + b.right) * 0.5, b.right)
+        return all(self._window_distance_at(a, t) <= self._window_distance_at(b, t) + 1e-8 for t in checks)
+
+    def _window_distance_at(self, window: _Window, edge_t: float) -> float:
+        assert window.edge is not None
+        point = self._point_on_edge_2d(window.face_coords, window.edge, edge_t)
+        return window.source_distance + self._distance_2d(window.pseudo_source, point)
+
+    def _recover_path(
+        self,
+        window: _Window,
+        end_id: int,
+        vertices: Sequence[Vector3],
+        faces: Sequence[Face],
+    ) -> List[Vector3]:
+        end = vertices[end_id]
+        points = self._recover_to_point(window, end, vertices, faces)
+        if not points[-1].approx_equal(end, eps=1e-7):
+            points.append(end)
+        return self._dedupe_points(points)
+
+    def _recover_to_point(
+        self,
+        window: _Window,
+        target: Vector3,
+        vertices: Sequence[Vector3],
+        faces: Sequence[Face],
+    ) -> List[Vector3]:
+        if window.edge is None:
+            start_vertex = self._source_vertex_from_seed(window, vertices, faces)
+            return [start_vertex, target]
+
+        target_2d = self._point_to_face_2d(vertices, faces[window.face_id], window.face_coords, target)
+        hit = self._segment_intersection_2d(
+            window.pseudo_source,
+            target_2d,
+            window.face_coords[window.edge[0]],
+            window.face_coords[window.edge[1]],
+        )
+        if hit is None:
+            edge_t = (window.left + window.right) * 0.5
+        else:
+            _line_t, edge_t = hit
+            edge_t = max(window.left, min(window.right, edge_t))
+
+        crossing = self._point_on_edge_3d(vertices, window.edge, edge_t)
+        if window.predecessor is None:
+            return [crossing, target]
+        points = self._recover_to_point(window.predecessor, crossing, vertices, faces)
+        points.append(target)
+        return points
+
+    @staticmethod
+    def _source_vertex_from_seed(
+        window: _Window,
+        vertices: Sequence[Vector3],
+        faces: Sequence[Face],
+    ) -> Vector3:
+        for idx in faces[window.face_id]:
+            if window.face_coords[idx] == window.pseudo_source:
+                return vertices[idx]
+        return vertices[faces[window.face_id][0]]
+
+    def _unfold_neighbor_face(
         self,
         vertices: Sequence[Vector3],
         faces: Sequence[Face],
-        sequence: Sequence[int],
-        start_id: int,
-        end_id: int,
-    ) -> Optional[_UnfoldedStrip]:
-        first = faces[sequence[0]]
-        coords_by_face: list[dict[int, Point2]] = [self._initial_face_coords(vertices, first)]
+        current_id: int,
+        neighbor_id: int,
+        shared_edge: Edge,
+        current_coords: Dict[int, Point2],
+    ) -> Optional[Dict[int, Point2]]:
+        current_face = faces[current_id]
+        neighbor_face = faces[neighbor_id]
+        prev_vertex = next(idx for idx in current_face if idx not in shared_edge)
+        new_vertex = next(idx for idx in neighbor_face if idx not in shared_edge)
 
-        for prev_face_id, face_id in zip(sequence, sequence[1:]):
-            prev_face = faces[prev_face_id]
-            face = faces[face_id]
-            shared = [idx for idx in face if idx in prev_face]
-            if len(shared) != 2:
-                return None
-            new_vertex = next(idx for idx in face if idx not in shared)
-            prev_vertex = next(idx for idx in prev_face if idx not in shared)
-            prev_coords = coords_by_face[-1]
-            new_coords = self._place_adjacent_vertex(
-                vertices,
-                prev_coords,
-                shared[0],
-                shared[1],
-                prev_vertex,
-                new_vertex,
-            )
-            if new_coords is None:
-                return None
-            coords_by_face.append(new_coords)
-
-        start_2d = coords_by_face[0].get(start_id)
-        end_2d = coords_by_face[-1].get(end_id)
-        if start_2d is None or end_2d is None:
-            return None
-
-        points = [vertices[start_id]]
-        last_line_t = 0.0
-        for step, (prev_face_id, face_id) in enumerate(zip(sequence, sequence[1:])):
-            shared = [idx for idx in faces[face_id] if idx in faces[prev_face_id]]
-            a2 = coords_by_face[step][shared[0]]
-            b2 = coords_by_face[step][shared[1]]
-            hit = self._segment_intersection_2d(start_2d, end_2d, a2, b2)
-            if hit is None:
-                return None
-            line_t, edge_t = hit
-            if line_t < last_line_t - 1e-8:
-                return None
-            last_line_t = line_t
-            a3 = vertices[shared[0]]
-            b3 = vertices[shared[1]]
-            crossing = a3.lerp(b3, edge_t)
-            if not crossing.approx_equal(points[-1], eps=1e-7):
-                points.append(crossing)
-
-        if not vertices[end_id].approx_equal(points[-1], eps=1e-7):
-            points.append(vertices[end_id])
-        return _UnfoldedStrip(points=points, distance=self._distance_2d(start_2d, end_2d))
-
-    @staticmethod
-    def _initial_face_coords(vertices: Sequence[Vector3], face: Face) -> dict[int, Point2]:
-        a, b, c = face
-        ab = vertices[a].distance_to(vertices[b])
-        ac = vertices[a].distance_to(vertices[c])
-        bc = vertices[b].distance_to(vertices[c])
-        x = (ac * ac + ab * ab - bc * bc) / (2.0 * ab)
-        y = max(0.0, ac * ac - x * x)
-        return {a: (0.0, 0.0), b: (ab, 0.0), c: (x, math.sqrt(y))}
-
-    def _place_adjacent_vertex(
-        self,
-        vertices: Sequence[Vector3],
-        prev_coords: dict[int, Point2],
-        edge_a: int,
-        edge_b: int,
-        prev_vertex: int,
-        new_vertex: int,
-    ) -> Optional[dict[int, Point2]]:
-        a2 = prev_coords[edge_a]
-        b2 = prev_coords[edge_b]
-        prev2 = prev_coords[prev_vertex]
-        da = vertices[new_vertex].distance_to(vertices[edge_a])
-        db = vertices[new_vertex].distance_to(vertices[edge_b])
+        a2 = current_coords[shared_edge[0]]
+        b2 = current_coords[shared_edge[1]]
+        prev2 = current_coords[prev_vertex]
+        da = vertices[new_vertex].distance_to(vertices[shared_edge[0]])
+        db = vertices[new_vertex].distance_to(vertices[shared_edge[1]])
         candidates = self._circle_intersections(a2, da, b2, db)
         if not candidates:
             return None
@@ -372,7 +611,46 @@ class ChenHanExactStrategy(PathfindingStrategy):
             if side_prev * side_candidate < 0.0:
                 chosen = candidate
                 break
-        return {edge_a: a2, edge_b: b2, new_vertex: chosen}
+        return {shared_edge[0]: a2, shared_edge[1]: b2, new_vertex: chosen}
+
+    @staticmethod
+    def _initial_face_coords(vertices: Sequence[Vector3], face: Face) -> Dict[int, Point2]:
+        a, b, c = face
+        ab = vertices[a].distance_to(vertices[b])
+        ac = vertices[a].distance_to(vertices[c])
+        bc = vertices[b].distance_to(vertices[c])
+        x = (ac * ac + ab * ab - bc * bc) / (2.0 * ab)
+        y = max(0.0, ac * ac - x * x)
+        return {a: (0.0, 0.0), b: (ab, 0.0), c: (x, math.sqrt(y))}
+
+    def _point_to_face_2d(
+        self,
+        vertices: Sequence[Vector3],
+        face: Face,
+        coords: Dict[int, Point2],
+        point: Vector3,
+    ) -> Point2:
+        a, b, c = face
+        u, v, w = barycentric_coordinates(point, vertices[a], vertices[b], vertices[c])
+        a2, b2, c2 = coords[a], coords[b], coords[c]
+        return (
+            u * a2[0] + v * b2[0] + w * c2[0],
+            u * a2[1] + v * b2[1] + w * c2[1],
+        )
+
+    def _edge_point_2d(self, window: _Window, edge_t: float) -> Point2:
+        assert window.edge is not None
+        return self._point_on_edge_2d(window.face_coords, window.edge, edge_t)
+
+    @staticmethod
+    def _point_on_edge_2d(coords: Dict[int, Point2], edge: Edge, t: float) -> Point2:
+        a = coords[edge[0]]
+        b = coords[edge[1]]
+        return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+
+    @staticmethod
+    def _point_on_edge_3d(vertices: Sequence[Vector3], edge: Edge, t: float) -> Vector3:
+        return vertices[edge[0]].lerp(vertices[edge[1]], t)
 
     @staticmethod
     def _circle_intersections(a: Point2, ra: float, b: Point2, rb: float) -> List[Point2]:
@@ -391,7 +669,7 @@ class ChenHanExactStrategy(PathfindingStrategy):
         return [(base[0] + perp[0], base[1] + perp[1]), (base[0] - perp[0], base[1] - perp[1])]
 
     @staticmethod
-    def _segment_intersection_2d(
+    def _line_line_intersection(
         p: Point2,
         q: Point2,
         a: Point2,
@@ -406,8 +684,19 @@ class ChenHanExactStrategy(PathfindingStrategy):
             return None
         ax = a[0] - p[0]
         ay = a[1] - p[1]
-        line_t = (ax * sy - ay * sx) / denom
-        edge_t = (ax * ry - ay * rx) / denom
+        return ((ax * sy - ay * sx) / denom, (ax * ry - ay * rx) / denom)
+
+    def _segment_intersection_2d(
+        self,
+        p: Point2,
+        q: Point2,
+        a: Point2,
+        b: Point2,
+    ) -> Optional[Tuple[float, float]]:
+        hit = self._line_line_intersection(p, q, a, b)
+        if hit is None:
+            return None
+        line_t, edge_t = hit
         if -1e-8 <= line_t <= 1.0 + 1e-8 and -1e-8 <= edge_t <= 1.0 + 1e-8:
             return (max(0.0, min(1.0, line_t)), max(0.0, min(1.0, edge_t)))
         return None
@@ -419,3 +708,15 @@ class ChenHanExactStrategy(PathfindingStrategy):
     @staticmethod
     def _distance_2d(a: Point2, b: Point2) -> float:
         return math.hypot(a[0] - b[0], a[1] - b[1])
+
+    @staticmethod
+    def _path_length(points: Sequence[Vector3]) -> float:
+        return sum(a.distance_to(b) for a, b in zip(points, points[1:]))
+
+    @staticmethod
+    def _dedupe_points(points: Sequence[Vector3]) -> List[Vector3]:
+        result: list[Vector3] = []
+        for point in points:
+            if not result or not point.approx_equal(result[-1], eps=1e-7):
+                result.append(point)
+        return result
