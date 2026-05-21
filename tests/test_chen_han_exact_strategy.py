@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from unittest.mock import MagicMock
 
 from core.vector3 import Vector3
@@ -68,6 +69,29 @@ def test_blocked_case_uses_window_predecessor_chain(tmp_path):
     assert candidate.window.edge is not None
     assert candidate.window.predecessor is not None
     assert len(candidate.window.sequence) >= 2
+
+
+def test_surface_points_inside_cube_faces_keep_hull_manifold(tmp_path):
+    mesh = _cube_mesh(tmp_path)
+    strategy = ChenHanExactStrategy()
+    start = Vector3(0.45479940882771563, 0.5, 0.47467971577963786)
+    end = Vector3(0.5000000000000004, -0.4782492757849155, -0.4790163908772156)
+
+    result = strategy.find_path(start, end, mesh)
+
+    assert result.found is True
+    assert result.points[0].approx_equal(start)
+    assert result.points[-1].approx_equal(end)
+    for a, b in zip(result.points, result.points[1:]):
+        assert not segment_intersects_mesh(a, b, mesh.triangles)
+
+    vertices, faces = strategy._build_convex_hull([*mesh.vertices, start, end])
+    edge_to_faces = defaultdict(list)
+    for face_id, face in enumerate(faces):
+        for edge in strategy._face_edges(face):
+            edge_to_faces[tuple(sorted(edge))].append(face_id)
+
+    assert all(len(incident) == 2 for incident in edge_to_faces.values())
 
 
 def test_chen_han_exact_is_default_strategy(tmp_path):

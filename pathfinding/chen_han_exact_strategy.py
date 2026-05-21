@@ -167,12 +167,7 @@ class ChenHanExactStrategy(PathfindingStrategy):
         faces: list[Face] = []
         seen: set[Face] = set()
         for indices in plane_groups.values():
-            polygon = self._ordered_face_polygon(vertices, sorted(indices), center)
-            if len(polygon) < 3:
-                continue
-            anchor = polygon[0]
-            for a, b in zip(polygon[1:-1], polygon[2:]):
-                face = (anchor, a, b)
+            for face in self._triangulate_coplanar_face(vertices, sorted(indices), center):
                 if self._face_area(vertices, face) < EPSILON:
                     continue
                 oriented = self._orient_outward(vertices, face, center)
@@ -210,34 +205,194 @@ class ChenHanExactStrategy(PathfindingStrategy):
             round(d * scale),
         )
 
-    def _ordered_face_polygon(
+    def _triangulate_coplanar_face(
         self,
         vertices: Sequence[Vector3],
         indices: Sequence[int],
         center: Vector3,
-    ) -> List[int]:
+    ) -> List[Face]:
+        if len(indices) < 3:
+            return []
+
         face_center = self._centroid([vertices[i] for i in indices])
-        normal = (vertices[indices[1]] - vertices[indices[0]]).cross(
-            vertices[indices[2]] - vertices[indices[0]]
-        ).normalized()
+        normal: Optional[Vector3] = None
+        for i, j, k in itertools.combinations(indices, 3):
+            candidate = (vertices[j] - vertices[i]).cross(vertices[k] - vertices[i])
+            if candidate.length() >= EPSILON:
+                normal = candidate.normalized()
+                break
+        if normal is None:
+            return []
         if (center - face_center).dot(normal) > 0.0:
             normal = -normal
 
-        axis_u = (vertices[indices[0]] - face_center).normalized()
-        axis_v = normal.cross(axis_u).normalized()
-
-        def angle(idx: int) -> float:
+        axis_u: Optional[Vector3] = None
+        for idx in indices:
             rel = vertices[idx] - face_center
-            return math.atan2(rel.dot(axis_v), rel.dot(axis_u))
-
-        ordered = sorted(indices, key=angle)
-        if len(ordered) >= 3:
-            tri_normal = (vertices[ordered[1]] - vertices[ordered[0]]).cross(
-                vertices[ordered[2]] - vertices[ordered[0]]
+            if rel.length() >= EPSILON:
+                axis_u = rel.normalized()
+                break
+        if axis_u is None:
+            return []
+        axis_v = normal.cross(axis_u).normalized()
+        coords = {
+            idx: (
+                (vertices[idx] - face_center).dot(axis_u),
+                (vertices[idx] - face_center).dot(axis_v),
             )
-            if tri_normal.dot(normal) < 0.0:
-                ordered.reverse()
-        return ordered
+            for idx in indices
+        }
+
+        boundary = self._convex_hull_2d(indices, coords)
+        if len(boundary) < 3:
+            return []
+
+        triangles: list[Face] = [
+            (boundary[0], a, b)
+            for a, b in zip(boundary[1:-1], boundary[2:])
+        ]
+        for idx in indices:
+            if idx not in boundary:
+                triangles = self._insert_point_in_2d_triangulation(triangles, idx, coords)
+
+        return [self._orient_2d_face(face, coords) for face in triangles]
+
+    @classmethod
+    def _convex_hull_2d(
+        cls,
+        indices: Sequence[int],
+        coords: Dict[int, Point2],
+    ) -> List[int]:
+        ordered = sorted(indices, key=lambda idx: (coords[idx][0], coords[idx][1], idx))
+
+        def build_half(points: Sequence[int]) -> list[int]:
+            half: list[int] = []
+            for idx in points:
+                while len(half) >= 2:
+                    a, b = half[-2], half[-1]
+                    if cls._orient_2d(coords[a], coords[b], coords[idx]) > 1e-10:
+                        break
+                    half.pop()
+                half.append(idx)
+            return half
+
+        lower = build_half(ordered)
+        upper = build_half(list(reversed(ordered)))
+        return lower[:-1] + upper[:-1]
+
+    def _insert_point_in_2d_triangulation(
+        self,
+        triangles: Sequence[Face],
+        point_id: int,
+        coords: Dict[int, Point2],
+    ) -> List[Face]:
+        edge_hit: Optional[Edge] = None
+        for tri in triangles:
+            for edge in self._face_edges(tri):
+                if self._point_on_segment_2d(
+                    coords[point_id],
+                    coords[edge[0]],
+                    coords[edge[1]],
+                ):
+                    edge_hit = tuple(sorted(edge))
+                    break
+            if edge_hit is not None:
+                break
+
+        if edge_hit is not None:
+            result: list[Face] = []
+            for tri in triangles:
+                if edge_hit[0] in tri and edge_hit[1] in tri:
+                    split = self._split_triangle_edge_2d(tri, edge_hit, point_id, coords)
+                    result.extend(split)
+                else:
+                    result.append(tri)
+            return self._filter_degenerate_2d(result, coords)
+
+        for tri in triangles:
+            if self._point_in_triangle_2d(coords[point_id], tri, coords):
+                result = [old for old in triangles if old != tri]
+                a, b, c = tri
+                result.extend(
+                    [
+                        self._orient_2d_face((a, b, point_id), coords),
+                        self._orient_2d_face((b, c, point_id), coords),
+                        self._orient_2d_face((c, a, point_id), coords),
+                    ]
+                )
+                return self._filter_degenerate_2d(result, coords)
+
+        return list(triangles)
+
+    def _split_triangle_edge_2d(
+        self,
+        tri: Face,
+        edge: Edge,
+        point_id: int,
+        coords: Dict[int, Point2],
+    ) -> List[Face]:
+        ordered_edge: Optional[Edge] = None
+        for i, candidate in enumerate(self._face_edges(tri)):
+            if tuple(sorted(candidate)) == edge:
+                ordered_edge = candidate
+                opposite = tri[(i + 2) % 3]
+                break
+        if ordered_edge is None:
+            return [tri]
+
+        a, b = ordered_edge
+        return [
+            self._orient_2d_face((a, point_id, opposite), coords),
+            self._orient_2d_face((point_id, b, opposite), coords),
+        ]
+
+    @staticmethod
+    def _orient_2d_face(face: Face, coords: Dict[int, Point2]) -> Face:
+        a, b, c = face
+        if ChenHanExactStrategy._orient_2d(coords[a], coords[b], coords[c]) < 0.0:
+            return (a, c, b)
+        return face
+
+    @staticmethod
+    def _filter_degenerate_2d(
+        triangles: Sequence[Face],
+        coords: Dict[int, Point2],
+    ) -> List[Face]:
+        result: list[Face] = []
+        seen: set[Face] = set()
+        for face in triangles:
+            a, b, c = face
+            if len({a, b, c}) < 3:
+                continue
+            if abs(ChenHanExactStrategy._orient_2d(coords[a], coords[b], coords[c])) < 1e-10:
+                continue
+            key = tuple(sorted(face))
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(face)
+        return result
+
+    @staticmethod
+    def _point_on_segment_2d(point: Point2, a: Point2, b: Point2) -> bool:
+        cross = abs(ChenHanExactStrategy._orient_2d(a, b, point))
+        if cross > 1e-10:
+            return False
+        dot = (point[0] - a[0]) * (point[0] - b[0]) + (point[1] - a[1]) * (point[1] - b[1])
+        return dot <= 1e-10
+
+    @staticmethod
+    def _point_in_triangle_2d(
+        point: Point2,
+        tri: Face,
+        coords: Dict[int, Point2],
+    ) -> bool:
+        a, b, c = (coords[idx] for idx in tri)
+        return (
+            ChenHanExactStrategy._orient_2d(a, b, point) >= -1e-10
+            and ChenHanExactStrategy._orient_2d(b, c, point) >= -1e-10
+            and ChenHanExactStrategy._orient_2d(c, a, point) >= -1e-10
+        )
 
     @staticmethod
     def _face_area(vertices: Sequence[Vector3], face: Face) -> float:
